@@ -3,6 +3,8 @@ from vk_api.longpoll import VkLongPoll, VkEventType #LongPoll
 from random import randrange #Случайные числа
 from fuzzywuzzy.fuzz import ratio #Библиотека сравнения
 from os.path import exists #Для работы с FileSystem
+import json
+
 
 #НАСТРОЙКИ
 token = "" #Токен сообщества
@@ -10,24 +12,40 @@ adminID = [248451355] #ID администраторов
 eventsDebug = False #Включить логирование событей Longpoll
 DataBaseFile = "faq.txt" #Файл для сохранения вопросов
 TempFile = "forModeration.txt" #Файл для сохранения предложений
+BlackListFile = "blacklist.txt" #Файл для сохранения ЧС
+blackListLetters = "bad.json" #Файл JSON с нецензурными словами
 keyboards = {
     "menu": "./keyboards/menu.json", #JSON клавиатуры меню
     "aMenu": "./keyboards/aMenu.json", #JSON клавиатуры админ меню
     "close": "./keyboards/close.json", #JSON клавиатуры отмены
     "badFAQ": "./keyboards/badFAQ.json" #JSON клавиатуры после получения ответа
 }
+allowTranslate = True #Включить трансформацию слов (ghbdtn -> привет)
 #/////////
 
 if not exists(DataBaseFile):
     open(DataBaseFile, "w", encoding = "UTF-8")
 if not exists(TempFile):
     open(TempFile, "w", encoding = "UTF-8")
+if not exists(BlackListFile):
+    open(BlackListFile, "w", encoding = "UTF-8")
 
 for u in keyboards:
     if not exists(keyboards[u]):
         print("FATAL ERROR: НЕ НАЙДЕНА КЛАВИАТУРА " + u)
         exit(1)
 
+bl = {}
+blf = open(BlackListFile, "r", encoding = "UTF-8").read().split("\n")
+for f in range(len(blf)):
+    if blf[f]:
+        bl[int(blf[f].split()[0])] = int(blf[f].split()[1])
+
+if exists(blackListLetters):
+    with open(blackListLetters, "r", encoding = "UTF-8") as read_file:
+       bad = json.load(read_file)
+else:
+    print("FATAL ERROR: НЕ НАЙДЕНЫ ПЛОХИЕ СЛОВА")
 
 vk_session = vk_api.VkApi(token = token)
 
@@ -58,6 +76,22 @@ def have(m, i): #Имеет ли массив индекс
     except IndexError:
         return False
 
+def translate(cmd):
+    replacer = {
+            "q":"й", "w":"ц", "e":"у", "r":"к", "t":"е", "y":"н", "u":"г",
+            "i":"ш", "o":"щ", "p":"з", "[":"х", "]":"ъ", "a":"ф", "s":"ы",
+            "d":"в", "f":"а", "g":"п", "h":"р", "j":"о", "k":"л", "l":"д",
+            ";":"ж", "'":"э", "z":"я", "x":"ч", "c":"с", "v":"м", "b":"и",
+            "n":"т", "m":"ь", ",":"б", ".":"ю", "/":"."
+    }  
+    t = ""
+    for j in cmd:
+        try:
+            t += replacer[j]
+        except KeyError:
+            t += j
+    return t
+
 def send_msgs(peers, message): #Отправить рассылку
     if len(peers) > 100:
         return
@@ -73,8 +107,21 @@ def send_msgs(peers, message): #Отправить рассылку
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW: #Если событие - сообщение
         if event.to_me: #Если сообщение мне
+            if event.user_id in bl:
+                if not bl[event.user_id]:
+                    send_msg_without_keyboard(event.user_id, "Ошибка, вы находитесь в ЧС, если это ошибка - напишите администратору")
+                    bl[event.user_id] = 1
+                    nCont = ""
+                    for g in bl:
+                        nCont += str(g) + " " + str(bl[g]) + "\n"
+                    open(BlackListFile, "w", encoding = "UTF-8").write(nCont)
+                continue
+
             author = get_user(event.user_id)[0] #Получаю профиль автора
-            cmd = str(event.text).lower() #Получаю команду
+            if allowTranslate:
+                cmd = translate(str(event.text).lower()) #Получаю команду
+            else:
+                cmd = str(event.text).lower() #Получаю команду
             aid = event.user_id #ID пользователя
             if aid in addUsers: #Если автор предлагает вопрос
                 if cmd == "отменить":
@@ -126,9 +173,28 @@ for event in longpoll.listen():
                         else:
                             send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
                     else:
+                        #Проверка на плохие слова
+                        jh = False 
+                        for k in cmd.split():
+                            if k in bad:
+                                nCont = ""
+                                for g in bl:
+                                    nCont += str(g) + " " + str(bl[g]) + "\n"
+                                nCont += str(aid) + " 0\n"
+                                bl[aid] = 0
+                                open(BlackListFile, "w", encoding = "UTF-8").write(nCont)
+                                if aid in adminID:
+                                    send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["aMenu"])
+                                else:
+                                    send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["menu"])
+                                jh = True
+                        if jh:
+                            continue
                         DataBase = open(DataBaseFile, "r", encoding = "UTF-8").read().split("\n")
                         r = {"index": 0, "percent": 0}
                         for l in range(len(DataBase)):
+                            if not DataBase[l]:
+                                continue
                             h = ratio(cmd, DataBase[l].split("**&?<How>*")[0])
                             if h > r["percent"]:
                                 r["index"] = l
@@ -156,12 +222,12 @@ for event in longpoll.listen():
                 if not aid in adminID:
                     send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
                     continue
-                DB = open(TempFile, "r", encoding = "UTF-8").read().split("\n")
+                DB = list(filter(None, open(TempFile, "r", encoding = "UTF-8").read().split("\n")))
                 string = ""
                 for y in range(len(DB)):
                     if y:
                         string += str(y) + ". " + str(DB[y].split("**&?<Mod>*")[0]) + "  Ответ: " + str(DB[y].split("**&?<Mod>*")[1]) + "  От: https://vk.com/id" + str(DB[y].split("**&?<Mod>*")[2]) + " ;\n"
-                if len(DB) >= 2:
+                if len(DB) >= 1:
                     send_msg_without_keyboard(aid, "Вопросы на модерацию:\n" + string)
                     send_msg_without_keyboard(aid, "Подсказка: введите удалить {Index} что бы отклонить предложение\nВведите проверка {Index} что бы добавить предложение в основную БД")
                 else:
@@ -201,6 +267,13 @@ for event in longpoll.listen():
                 del loaded[int(cmd.split()[1])]
                 open(TempFile, "w", encoding = "UTF-8").write('\n'.join(str(e) for e in loaded))
                 send_msg_without_keyboard(aid, "Успешно, предложение принято")
+            elif cmd == "мы":
+                send_msg_without_keyboard(aid, """
+Создатель: Даниил
+Discord: Avenger#1818
+Версия: 1.1
+Библиотеки: vk_api, requests, fuzzywuzzy
+                """)
 
             vk_session.method("messages.markAsRead", {"peer_id": aid, "message_id": vk_session.method("messages.getHistory", {"user_id": aid, "count": 1})["items"][0]["id"]}) #Читаю сообщение
     else:
