@@ -1,0 +1,33 @@
+{
+    "one_time": false,
+    "buttons": [
+      [{
+        "action": {
+          "type": "text",
+          "label": "Задать вопрос"
+        },
+        "color": "primary"
+      }], 
+      [{
+        "action": {
+            "type": "text",
+            "label": "Предложить вопрос"
+        },
+        "color": "positive"
+      }],
+      [{
+        "action": {
+            "type": "text",
+            "label": "Добавить"
+        },
+        "color": "secondary"
+      },
+      {
+        "action": {
+            "type": "text",
+            "label": "Просмотреть предложения"
+        },
+        "color": "secondary"
+      }]
+    ]
+  }

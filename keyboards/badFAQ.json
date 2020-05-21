@@ -1,0 +1,19 @@
+{
+    "one_time": false,
+    "buttons": [
+      [{
+        "action": {
+          "type": "text",
+          "label": "Это не ответ на мой вопрос"
+        },
+        "color": "negative"
+      }], 
+      [{
+        "action": {
+          "type": "text",
+          "label": "Спасибо"
+        },
+        "color": "positive"
+      }]
+    ]
+  }

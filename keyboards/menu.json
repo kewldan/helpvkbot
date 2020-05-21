@@ -1,1 +1,19 @@
-
+{
+    "one_time": false,
+    "buttons": [
+      [{
+        "action": {
+          "type": "text",
+          "label": "Задать вопрос"
+        },
+        "color": "primary"
+      }],
+      [{
+          "action": {
+            "type": "text",
+            "label": "Предложить вопрос"
+          },
+          "color": "positive"
+      }]
+    ]
+  }
