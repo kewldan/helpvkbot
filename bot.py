@@ -3,16 +3,15 @@ from vk_api.longpoll import VkLongPoll, VkEventType #LongPoll
 from random import randrange #Случайные числа
 from fuzzywuzzy.fuzz import ratio #Библиотека сравнения
 from os.path import exists #Для работы с FileSystem
-import json
-
+from json import load, dump
 
 #НАСТРОЙКИ
-token = "" #Токен сообщества
+token = "cdea1df1d647fac87586fa58e01dd7f0a930182ef3738d89d2d035ce094c9840dfe6586682cf8c5005d12" #Токен сообщества
 adminID = [248451355] #ID администраторов
 eventsDebug = False #Включить логирование событей Longpoll
-DataBaseFile = "faq.txt" #Файл для сохранения вопросов
-TempFile = "forModeration.txt" #Файл для сохранения предложений
-BlackListFile = "blacklist.txt" #Файл для сохранения ЧС
+DataBaseFile = "faq.json" #Файл для сохранения вопросов
+TempFile = "forModeration.json" #Файл для сохранения предложений
+BlackListFile = "blacklist.json" #Файл для сохранения ЧС
 blackListLetters = "bad.json" #Файл JSON с нецензурными словами
 keyboards = {
     "menu": "./keyboards/menu.json", #JSON клавиатуры меню
@@ -20,34 +19,44 @@ keyboards = {
     "close": "./keyboards/close.json", #JSON клавиатуры отмены
     "badFAQ": "./keyboards/badFAQ.json" #JSON клавиатуры после получения ответа
 }
-allowTranslate = True #Включить трансформацию слов (ghbdtn -> привет)
+allowTranslate = False #Включить трансформацию слов (ghbdtn -> привет)
 #/////////
 
 if not exists(DataBaseFile):
-    open(DataBaseFile, "w", encoding = "UTF-8")
+    open(DataBaseFile, "w", encoding = "UTF-8").write("[]")
 if not exists(TempFile):
-    open(TempFile, "w", encoding = "UTF-8")
+    open(TempFile, "w", encoding = "UTF-8").write("[]")
 if not exists(BlackListFile):
-    open(BlackListFile, "w", encoding = "UTF-8")
+    open(BlackListFile, "w", encoding = "UTF-8").write("{}")
+
 
 for u in keyboards:
     if not exists(keyboards[u]):
         print("FATAL ERROR: НЕ НАЙДЕНА КЛАВИАТУРА " + u)
         exit(1)
 
-bl = {}
-blf = open(BlackListFile, "r", encoding = "UTF-8").read().split("\n")
-for f in range(len(blf)):
-    if blf[f]:
-        bl[int(blf[f].split()[0])] = int(blf[f].split()[1])
+#ЗАГРУЗКА
+#Загрузка BlackList (ЧС)
+with open(BlackListFile, "r", encoding = "UTF-8") as blf:
+    bl = load(blf)
 
+#ЗАГРУЗКА DB:
+with open(DataBaseFile, "r", encoding = "UTF-8") as db:
+    DB = load(db)
+
+#ЗАГРУЗКА TF:
+with open(TempFile, "r", encoding = "UTF-8") as tf:
+    TF = load(tf)
+
+#ЗАГРУЗКА bad.json
 if exists(blackListLetters):
     with open(blackListLetters, "r", encoding = "UTF-8") as read_file:
-       bad = json.load(read_file)
+       bad = load(read_file)
 else:
     print("FATAL ERROR: НЕ НАЙДЕНЫ ПЛОХИЕ СЛОВА")
+#/////////
 
-vk_session = vk_api.VkApi(token = token)
+vk_session = vk_api.VkApi(token = token) #Сессия VK
 
 waitUsers = {} #Пользователи которые вводят вопрос
 addAdmins = {} #Администраторы которые добавляют вопрос
@@ -55,7 +64,7 @@ addUsers = {} #Пользователи которые предлагают св
 
 try:
     vk_session.auth() #Авторизуюсь
-except vk_api.AuthError:
+except vk_api.AuthError: #Если ошибка авторизации
     pass
 
 longpoll = VkLongPoll(vk_session) #Сессия LongPoll
@@ -92,142 +101,146 @@ def translate(cmd):
             t += j
     return t
 
+def maybeInt(inr):
+    try:
+        int(inr)
+        return True
+    except TypeError:
+        return False
 def send_msgs(peers, message): #Отправить рассылку
     if len(peers) > 100:
         return
-    rt = ""
-    for key in range(len(peers)):
-        if key:
-            rt += "," + str(peers[key])
-        else:
-            rt += str(peers[key])
-    vk_session.method("messages.send", {"user_ids": rt, "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
+    peers2 = []
+    for f in range(len(peers)):
+        peers2[f] = str(peers[f])
+    vk_session.method("messages.send", {"user_ids": ",".join(peers2), "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
     
 
-for event in longpoll.listen():
+for event in longpoll.listen(): #Для каждого события
     if event.type == VkEventType.MESSAGE_NEW: #Если событие - сообщение
         if event.to_me: #Если сообщение мне
-            if event.user_id in bl:
-                if not bl[event.user_id]:
-                    send_msg_without_keyboard(event.user_id, "Ошибка, вы находитесь в ЧС, если это ошибка - напишите администратору")
-                    bl[event.user_id] = 1
-                    nCont = ""
-                    for g in bl:
-                        nCont += str(g) + " " + str(bl[g]) + "\n"
-                    open(BlackListFile, "w", encoding = "UTF-8").write(nCont)
-                continue
+            if event.user_id in bl: #Если человек в BlackList
+                if not bl[event.user_id]: #Если ему ещё не присылали сообщение
+                    send_msg_without_keyboard(event.user_id, "Ошибка, вы находитесь в ЧС, если это ошибка - напишите администратору") #Пишу ему сообщение
+                    bl[event.user_id] = 1 #Теперь он уже видел сообщение
+                    with open(BlackListFile, "w", encoding = "UTF-8") as wf:
+                        dump(bl, wf)
+                continue #Если человек в ЧС пропускаю обработку команд
 
             author = get_user(event.user_id)[0] #Получаю профиль автора
-            if allowTranslate:
+            if allowTranslate: #Если включен переводчик
                 cmd = translate(str(event.text).lower()) #Получаю команду
-            else:
+            else: #Если же нет
                 cmd = str(event.text).lower() #Получаю команду
             aid = event.user_id #ID пользователя
+
             if aid in addUsers: #Если автор предлагает вопрос
-                if cmd == "отменить":
-                    if aid in adminID:
+                if cmd == "отменить": #Если человек нажал на кнопку ОТМЕНИТЬ
+                    if aid in adminID: #Если он админ
                         send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
-                    else:
+                    else: #Для простых смертных
                         send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
-                    del addUsers[aid]
-                else:
-                    if addUsers[aid][0] == 1:
-                        send_msg_without_keyboard(aid, "Успешно, жду ответ...")
-                        addUsers[aid] = [2, cmd]
-                    elif addUsers[aid][0] == 2:
-                        send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ отправлен на модерирование")
-                        j = open(TempFile, "a", encoding = "UTF-8")
-                        j.write("\n" + addUsers[aid][1] + "**&?<Mod>*" + cmd + "**&?<Mod>*" + str(aid))
-                        j.close()
-                        del addUsers[aid]
-                        if aid in adminID:
+                    del addUsers[aid] #Удаляю его из массива
+                else: #Если он не нажимал на ОТМЕНИТЬ
+                    if addUsers[aid][0] == 1: #Если он пока что ничего не ввёл
+                        addUsers[aid] = [2, cmd] #Переписываю данные массива
+                        send_msg_without_keyboard(aid, "Успешно, жду ответ...") #Отправляю сообщение
+                    elif addUsers[aid][0] == 2: #Если он уже ввёл вопрос
+                        send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ отправлен на модерирование") #Сообщаю заранее что всё прошло ОК
+
+                        TF.append([addUsers[aid][1], cmd, aid])
+                        with open(TempFile, "w", encoding = "UTF-8") as tf:
+                            dump(TF, tf)
+                        del addUsers[aid] #Удаляю из базы
+                        if aid in adminID: #Если человек админ
                             send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
-                        else:
+                        else: #Если простой смертный
                             send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
 
             if aid in addAdmins: #Если админ добавляет вопрос
-                if addAdmins[aid][0] == 1:
-                    addAdmins[aid] = [2, cmd]
-                    send_msg_without_keyboard(aid, "Успешно, ожидаю ответ...")
-                elif addAdmins[aid][0] == 2:
-                    DB = open(DataBaseFile, "a", encoding = "UTF-8")
-                    DB.write("\n" + addAdmins[aid][1] + "**&?<How>*" + cmd)
-                    DB.close()
-                    send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ записан: " + addAdmins[aid][1] + "**&?<How>*" + cmd)
+                if addAdmins[aid][0] == 1: #Если он ничего пока что не ввёл
+                    addAdmins[aid] = [2, cmd] #Добавляю в массив
+                    send_msg_without_keyboard(aid, "Успешно, ожидаю ответ...") #Отправляю сообщение чтобы он отправил ответ
+                elif addAdmins[aid][0] == 2: #Если админ уже ввёл вопрос
+                    DB.append([addAdmins[aid][1], cmd])
+                    with open(DataBaseFile, "w", encoding = "UTF-8") as db:
+                        dump(DB, db)
+                    send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ записан") #Сообщаю что всё ОК
                     del addAdmins[aid]
-            if aid in waitUsers:
-                if waitUsers[aid][0] == 2 and cmd == "это не ответ на мой вопрос":
-                    send_msg_with_keyboard(aid, "Ошибка, я не знаю ответ на ваш вопрос. Я уже написал администратору что надо добавить ваш вопрос в базу", keyboards["menu"])
-                    send_msgs(adminID, "Человек (https://vk.com/id" + str(aid) + ") не нашёл ответ на свой вопрос: " + str(waitUsers[aid][1]))
-                    del waitUsers[aid]
-                elif waitUsers[aid][0] == 2 and cmd == "спасибо":
+            
+            if aid in waitUsers: #Если человек хочет задать вопрос
+                if waitUsers[aid][0] == 2 and cmd == "это не ответ на мой вопрос": #Если он уже всё сделал но он написал что это не ответ на мой вопрос
                     if aid in adminID:
+                        send_msg_with_keyboard(aid, "Ошибка, я не знаю ответ на ваш вопрос. Я уже написал администратору что надо добавить ваш вопрос в базу", keyboards["aMenu"])
+                    else:
+                        send_msg_with_keyboard(aid, "Ошибка, я не знаю ответ на ваш вопрос. Я уже написал администратору что надо добавить ваш вопрос в базу", keyboards["menu"]) #Отправляю его в меню
+                    send_msgs(adminID, "Человек (https://vk.com/id" + str(aid) + ") не нашёл ответ на свой вопрос: " + str(waitUsers[aid][1])) #Отправляю адмиНАМ что надо добавить вопрос в БД
+                    del waitUsers[aid] #Удаляю человека из массива
+                elif waitUsers[aid][0] == 2 and cmd == "спасибо": #Тоже самое как вверху только если он нажал на спасибо
+                    if aid in adminID: #Если он админ
                         send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
                     else:
                         send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
-                elif waitUsers[aid][0] == 1:
-                    if cmd == "отменить":
-                        del waitUsers[aid]
-                        if aid in adminID:
+                elif waitUsers[aid][0] == 1: #Если он не ввёл вопрос
+                    if cmd == "отменить": #Если нажал на кнопку отменить
+                        del waitUsers[aid] #Удаляю из базы
+                        if aid in adminID: #Если он админ
                             send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
                         else:
                             send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
-                    else:
+                    else: #Если он ввёл вопрос
+
                         #Проверка на плохие слова
-                        jh = False 
-                        for k in cmd.split():
-                            if k in bad:
-                                nCont = ""
-                                for g in bl:
-                                    nCont += str(g) + " " + str(bl[g]) + "\n"
-                                nCont += str(aid) + " 0\n"
-                                bl[aid] = 0
-                                open(BlackListFile, "w", encoding = "UTF-8").write(nCont)
-                                if aid in adminID:
-                                    send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["aMenu"])
-                                else:
-                                    send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["menu"])
-                                jh = True
-                        if jh:
-                            continue
-                        DataBase = open(DataBaseFile, "r", encoding = "UTF-8").read().split("\n")
-                        r = {"index": 0, "percent": 0}
-                        for l in range(len(DataBase)):
-                            if not DataBase[l]:
+                        if not aid in adminID: #Если человек админ - исключение
+                            jh = False #Пока что всё хорошо
+                            for k in cmd.split():
+                                if k in bad:
+                                    bl[aid] = 0
+                                    with open(BlackListFile, "w", encoding = "UTF-8") as blf:
+                                        dump(bl, blf)
+                                    if aid in adminID:
+                                        send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["aMenu"])
+                                    else:
+                                        send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["menu"])
+                                    jh = True
+                            if jh:
                                 continue
-                            h = ratio(cmd, DataBase[l].split("**&?<How>*")[0])
-                            if h > r["percent"]:
+                        #/////////////////////////
+
+                        r = {"index": 0, "percent": 0} #Как у кеши
+                        for l in range(len(DB)): #Для каждой строки в базе
+                            h = ratio(cmd, DB[l][0]) #Считаю схожесть строк
+                            if h > r["percent"]: #Ищу самый подходящий вопрос
                                 r["index"] = l
-                        waitUsers[aid][1] = cmd
-                        send_msg_with_keyboard(aid, "Успешно, я выбрал самый похожий вопрос (" + str(DataBase[r["index"]].split("**&?<How>*")[0]) + ") и вот на него ответ: " + str(DataBase[r["index"]].split("**&?<How>*")[1]), keyboards["badFAQ"])
-                        waitUsers[aid][0] = 2
+                        waitUsers[aid][1] = cmd 
+                        send_msg_with_keyboard(aid, "Успешно, я выбрал самый похожий вопрос (" + str(DB[r["index"]][0]) + ") и вот на него ответ: " + str(DB[r["index"]][1]), keyboards["badFAQ"])
+                        waitUsers[aid][0] = 2 #Ожидаю отзыв
+            
             if cmd == "старт" or cmd == "меню" or cmd == "начать": #Основные команды
-                if aid in adminID:
+                if aid in adminID: #Если человек админ
                     send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
                 else:
                     send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
-            elif cmd == "задать вопрос" and not aid in addUsers:
+            elif cmd == "задать вопрос" and not aid in addUsers: #Задать вопрос (Не админ)
                 send_msg_with_keyboard(aid, "Ожидаю вопрос...", keyboards["close"])
                 waitUsers[aid] = [1, ""]
-            elif cmd == "предложить вопрос" and not aid in waitUsers:
+            elif cmd == "предложить вопрос" and not aid in waitUsers: #Предложить вопрос (Не админ)
                 send_msg_with_keyboard(aid, "Ожидаю вопрос...", keyboards["close"])
                 addUsers[aid] = [1, "Q"]
-            elif cmd == "добавить":
+            elif cmd == "добавить": #Добавить вопрос/ответ (Админ)
                 if not aid in adminID:
-                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
+                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор") #Ошибка прав
                     continue
                 send_msg_without_keyboard(aid, "Ожидаю вопрос...")
                 addAdmins[aid] = [1, "Q"]
-            elif cmd == "просмотреть предложения":
+            elif cmd == "просмотреть предложения": #Модерировать предложения  (Админ)
                 if not aid in adminID:
                     send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
                     continue
-                DB = list(filter(None, open(TempFile, "r", encoding = "UTF-8").read().split("\n")))
-                string = ""
-                for y in range(len(DB)):
-                    if y:
-                        string += str(y) + ". " + str(DB[y].split("**&?<Mod>*")[0]) + "  Ответ: " + str(DB[y].split("**&?<Mod>*")[1]) + "  От: https://vk.com/id" + str(DB[y].split("**&?<Mod>*")[2]) + " ;\n"
-                if len(DB) >= 1:
+                if len(TF) >= 1: #Если предложения есть
+                    string = ""
+                    for y in range(len(TF)):
+                        string += str(y + 1) + ". " + str(TF[y][0]) + "  Ответ: " + str(TF[y][1]) + "  От: https://vk.com/id" + str(TF[y][2]) + " ;\n"
                     send_msg_without_keyboard(aid, "Вопросы на модерацию:\n" + string)
                     send_msg_without_keyboard(aid, "Подсказка: введите удалить {Index} что бы отклонить предложение\nВведите проверка {Index} что бы добавить предложение в основную БД")
                 else:
@@ -239,10 +252,13 @@ for event in longpoll.listen():
                 if not have(cmd.split(), 1):
                     send_msg_without_keyboard(aid, "Ошибка, вы не ввели index")
                     continue
-                loaded = open(TempFile, "r", encoding = "UTF-8").read().split("\n")
-                if have(loaded, int(cmd.split()[1])):
-                    del loaded[int(cmd.split()[1])]
-                    open(TempFile, "w", encoding = "UTF-8").write('\n'.join(str(e) for e in loaded))
+                if not maybeInt(cmd.split()[1]):
+                    send_msg_without_keyboard(aid, "Ошибка, Index не int")
+                    continue
+                if have(TF, int(cmd.split()[1]) - 1):
+                    del TF[int(cmd.split()[1]) - 1]
+                    with open(TempFile, "w", encoding = "UTF-8") as tf:
+                        dump(TF, tf)
                     send_msg_without_keyboard(aid, "Успешно, предложение отклонено")
                 else:
                     send_msg_without_keyboard(aid, "Ошибка, в базе данных нету строки с индексом " + str(cmd.split()[1]))
@@ -254,24 +270,25 @@ for event in longpoll.listen():
                 if not have(cmd.split(), 1):
                     send_msg_without_keyboard(aid, "Ошибка, вы не ввели index")
                     continue
-                h = open(TempFile, "r", encoding = "UTF-8").read().split("\n")
-                if not have(h, int(cmd.split()[1])):
+                if not maybeInt(cmd.split()[1]):
+                    send_msg_without_keyboard(aid, "Ошибка, Index не int")
+                    continue
+                if not have(TF, int(cmd.split()[1]) - 1):
                     send_msg_without_keyboard(aid, "Ошибка, в базе данных нету строки с индексом " + str(cmd.split()[1]))
                     continue
                 else:
-                    h = h[int(cmd.split()[1])]
-                g = open(DataBaseFile, "a", encoding = "UTF-8")
-                g.write("\n" + h.split("**&?<Mod>*")[0] + "**&?<How>*" + h.split("**&?<Mod>*")[1])
-                g.close()
-                loaded = open(TempFile, "r", encoding="UTF-8").read().split("\n")
-                del loaded[int(cmd.split()[1])]
-                open(TempFile, "w", encoding = "UTF-8").write('\n'.join(str(e) for e in loaded))
+                    h = int(cmd.split()[1]) - 1
+                DB.append([TF[h][0], TF[h][1]])
+                with open(DataBaseFile, "w", encoding = "UTF-8") as db:
+                    dump(DB, db)
+                del TF[int(cmd.split()[1]) - 1]
+                with open(TempFile, "w", encoding = "UTF-8") as tf:
+                    dump(TF, tf)
                 send_msg_without_keyboard(aid, "Успешно, предложение принято")
             elif cmd == "мы":
                 send_msg_without_keyboard(aid, """
-Создатель: Даниил
-Discord: Avenger#1818
-Версия: 1.1
+Создатель: Даниил Тенишев
+Версия: 1.3
 Библиотеки: vk_api, requests, fuzzywuzzy
                 """)
 
