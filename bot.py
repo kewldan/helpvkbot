@@ -1,430 +1,298 @@
-#VK MINECRAFT BOT#
-#  By: Avenger   #
-#   31.05.2020   #
-#  Version: 2.0  #
-
-import vk_api #API #pip install vk_api
+import vk_api #API
 from vk_api.longpoll import VkLongPoll, VkEventType #LongPoll
 from random import randrange #Случайные числа
+from fuzzywuzzy.fuzz import ratio #Библиотека сравнения
 from os.path import exists #Для работы с FileSystem
-from json import load, dump #JSON
-from requests import post #Запросы к YCAPI #pip install requests
-from hashlib import sha256 #Хеширование
-from sqlite3 import connect #Для БД AuthMe
-from ftplib import FTP #Для скачивания БД AuthMe
-from threading import Thread #Для потоков
+from json import load, dump
 
 #НАСТРОЙКИ
-token = "" #Главный токен
-
-LoggedUsersPath = "./logged.json" #JSON файл для БД
+token = "cdea1df1d647fac87586fa58e01dd7f0a930182ef3738d89d2d035ce094c9840dfe6586682cf8c5005d12" #Токен сообщества
+adminID = [248451355] #ID администраторов
+eventsDebug = False #Включить логирование событей Longpoll
+DataBaseFile = "faq.json" #Файл для сохранения вопросов
+TempFile = "forModeration.json" #Файл для сохранения предложений
+BlackListFile = "blacklist.json" #Файл для сохранения ЧС
+blackListLetters = "bad.json" #Файл JSON с нецензурными словами
 keyboards = {
-    "auth": "./keyboards/auth.json", #JSON клавиатуры меню
-    "Nauth": "./keyboards/nauth.json", #JSON клавиатуры админ меню
-    "close": "./keyboards/close.json" #JSON клавиатуры отмены
+    "menu": "./keyboards/menu.json", #JSON клавиатуры меню
+    "aMenu": "./keyboards/aMenu.json", #JSON клавиатуры админ меню
+    "close": "./keyboards/close.json", #JSON клавиатуры отмены
+    "badFAQ": "./keyboards/badFAQ.json" #JSON клавиатуры после получения ответа
 }
-Keyboards = {
-    "guest": "./keyboards2/guest.json", #Клавиатура гостя
-    "owner": "./keyboards2/owner.json" #Клавиатура владельца сервера
-}
+allowTranslate = False #Включить трансформацию слов (ghbdtn -> привет)
 #/////////
 
-if not exists(LoggedUsersPath):
-    open(LoggedUsersPath, "w", encoding = "UTF-8").write("{}")
-    DataBase = {}
-else:
-    with open(LoggedUsersPath, "r") as rf:
-        DataBase = load(rf)
+if not exists(DataBaseFile):
+    open(DataBaseFile, "w", encoding = "UTF-8").write("[]")
+if not exists(TempFile):
+    open(TempFile, "w", encoding = "UTF-8").write("[]")
+if not exists(BlackListFile):
+    open(BlackListFile, "w", encoding = "UTF-8").write("{}")
 
-def have(self, m, i): #Имеет ли массив индекс
-    try:
-        m[i]
-        return True
-    except IndexError:
-        return False
-
-def checkToken(token):
-    temp = vk_api.VkApi(token = token)
-    try:
-        temp.auth()
-    except vk_api.AuthError:
-        pass
-    try:
-        VkLongPoll(temp)
-    except vk_api.ApiError as err:
-        if err.error["error_code"] == 5:
-            return False
-        else:
-            return err.error["error_code"]
-    return True
-                                    
-
-def maybeInt(self, inr):
-    try:
-        int(inr)
-        return True
-    except TypeError:
-        return False
-
-def checkPassword(linePass, checkPass): #Проверяю корректность пароля
-    args = linePass.split("$")
-    g = sha256(checkPass.encode("UTF-8")).hexdigest() + args[2]
-    return linePass == "$SHA$" + args[2] + "$" + sha256(g.encode("UTF-8")).hexdigest()
 
 for u in keyboards:
     if not exists(keyboards[u]):
         print("FATAL ERROR: НЕ НАЙДЕНА КЛАВИАТУРА " + u)
         exit(1)
 
-class Main(Thread):
-    def __init__(self, token):
-        Thread.__init__(self)
-        self.requestAuth = {}
-        self.deleteUsers = {}
-        self.vk = vk_api.VkApi(token = token) #Сессия VK
+#ЗАГРУЗКА
+#Загрузка BlackList (ЧС)
+with open(BlackListFile, "r", encoding = "UTF-8") as blf:
+    bl = load(blf)
 
-        try:
-            self.vk.auth() #Авторизуюсь
-        except vk_api.AuthError: #Если ошибка авторизации
-            pass
+#ЗАГРУЗКА DB:
+with open(DataBaseFile, "r", encoding = "UTF-8") as db:
+    DB = load(db)
 
-    def checkOwner(self, owner_id):
-        for h in DataBase:
-            if DataBase[h]["OWNER"] == str(owner_id):
-                return True
+#ЗАГРУЗКА TF:
+with open(TempFile, "r", encoding = "UTF-8") as tf:
+    TF = load(tf)
+
+#ЗАГРУЗКА bad.json
+if exists(blackListLetters):
+    with open(blackListLetters, "r", encoding = "UTF-8") as read_file:
+       bad = load(read_file)
+else:
+    print("FATAL ERROR: НЕ НАЙДЕНЫ ПЛОХИЕ СЛОВА")
+#/////////
+
+vk_session = vk_api.VkApi(token = token) #Сессия VK
+
+waitUsers = {} #Пользователи которые вводят вопрос
+addAdmins = {} #Администраторы которые добавляют вопрос
+addUsers = {} #Пользователи которые предлагают свой вопрос
+
+try:
+    vk_session.auth() #Авторизуюсь
+except vk_api.AuthError: #Если ошибка авторизации
+    pass
+
+longpoll = VkLongPoll(vk_session) #Сессия LongPoll
+
+def get_user(user_id): #Получить профиль человека
+    return vk_session.method("users.get", {"user_id": user_id, "fields": "city, sex", "name_case": "Nom"})
+
+def send_msg_without_keyboard(peer, message): #Отправить сообщение без клавиатуры
+    vk_session.method("messages.send", {"peer_id": peer, "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
+
+def send_msg_with_keyboard(peer, message, keyboardFilePath): #Отправить сообщение с клавиатурой
+    vk_session.method("messages.send", {"peer_id": peer, "message": message, "keyboard": open(keyboardFilePath, "r", encoding="UTF-8").read(), "random_id": randrange(0, 184467440737095516165, 1)})
+
+def have(m, i): #Имеет ли массив индекс
+    try:
+        m[i]
+        return True
+    except IndexError:
         return False
 
-    def toMenu(self, user_id):
-        if self.checkOwner(user_id):
-            self.send_msg_with_keyboard(user_id, "Главное меню (Владелец)", Keyboards["owner"])
-        else:
-            self.send_msg_with_keyboard(user_id, "Главное меню (Гость)", Keyboards["guest"])
-    
-    def run(self):
-        print("Main bot active")
-        longpoll = VkLongPoll(self.vk) #Сессия LongPoll
-
-        for event in longpoll.listen(): #Для каждого события
-            if event.type == VkEventType.MESSAGE_NEW: #Если событие - сообщение
-                if event.to_me: #Если сообщение мне
-                    aid = str(event.user_id)
-                    cmd = str(event.text).lower()
-                    txt = event.text
-
-                    if aid in self.requestAuth:
-                        if cmd == "отменить":
-                            self.send_msg_without_keyboard(aid, "Успешно, операция отменена")
-                            self.toMenu(aid)
-                            del self.requestAuth[aid]
-                            continue
-                        if self.requestAuth[aid][0] == 1:
-                            if not txt in DataBase:
-                                self.requestAuth[aid][1] = txt
-                                self.requestAuth[aid][0] = 2
-                                self.send_msg_without_keyboard(aid, "Успешно, введите Токен сообщества сервера (https://vk.com/dev/access_token?f=2.%20Ключ%20доступа%20сообщества)")
-                            else:
-                                self.send_msg_without_keyboard(aid, "Ошибка, сервер с таким названием уже существует")
-                                self.toMenu(aid)
-                                del self.requestAuth[aid]
-                                continue
-                        elif self.requestAuth[aid][0] == 2:
-                            if checkToken(txt):
-                                self.requestAuth[aid][2]["TOKEN"] = txt
-                                self.requestAuth[aid][0] = 3
-                                self.send_msg_without_keyboard(aid, "Успешно, введите IP сервера")
-                            else:
-                                self.send_msg_without_keyboard(aid, "Ошибка, токен не корректен")
-                                self.toMenu(aid)
-                                del self.requestAuth[aid]
-                                continue
-                        elif self.requestAuth[aid][0] == 3:
-                            self.requestAuth[aid][2]["HOST"] = txt
-                            self.requestAuth[aid][0] = 4
-                            self.send_msg_without_keyboard(aid, "Успешно, введите привелегию, при которой можно возпользоватся консолью")
-                        elif self.requestAuth[aid][0] == 4:
-                            self.requestAuth[aid][2]["ConsoleAllowDonate"] = txt
-                            self.requestAuth[aid][0] = 5
-                            self.send_msg_without_keyboard(aid, "Успешно, введите RCON порт")
-                        elif self.requestAuth[aid][0] == 5:
-                            self.requestAuth[aid][2]["RCON"]["PORT"] = txt
-                            self.requestAuth[aid][0] = 6
-                            self.send_msg_without_keyboard(aid, "Успешно, введите RCON пароль")
-                        elif self.requestAuth[aid][0] == 6:
-                            self.requestAuth[aid][2]["RCON"]["PASSWORD"] = txt
-                            self.requestAuth[aid][0] = 7
-                            self.send_msg_without_keyboard(aid, "Успешно, введите MINECRAFT порт")
-                        elif self.requestAuth[aid][0] == 7:
-                            self.requestAuth[aid][2]["MINECRAFT"]["PORT"] = txt
-                            self.requestAuth[aid][0] = 8
-                            self.send_msg_without_keyboard(aid, "Успешно, введите FTP (Корневая папка - папка с server.jar) пользователя (Нужно право на чтение файлов)")
-                        elif self.requestAuth[aid][0] == 8:
-                            self.requestAuth[aid][2]["FTP"]["USERNAME"] = txt
-                            self.requestAuth[aid][0] = 9
-                            self.send_msg_without_keyboard(aid, "Успешно, введите FTP (Корневая папка - папка с server.jar) пароль от пользователя")
-                        elif self.requestAuth[aid][0] == 9:
-                            self.requestAuth[aid][2]["FTP"]["PASSWORD"] = txt
-                            self.requestAuth[aid][0] = 10
-                            self.send_msg_without_keyboard(aid, "Успешно, введите FTP (Корневая папка - папка с server.jar) название файла ./plugins/AuthMe/??????.db (По умолчанию это authme.db)")
-                        elif self.requestAuth[aid][0] == 10:
-                            self.requestAuth[aid][2]["FTP"]["DataBaseFile"] = txt
-                            self.send_msg_without_keyboard(aid, "Успешно, ваш сервер зарегистрирован! Бот начнёт работать в ближайшее время")
-                            DataBase[self.requestAuth[aid][1]] = self.requestAuth[aid][2]
-                            with open(LoggedUsersPath, "w", encoding = "UTF-8") as f:
-                                dump(DataBase, f)
-                            bots.bots.append(MineBot(self.requestAuth[aid][2]["TOKEN"], self.requestAuth[aid][2], self.requestAuth[aid][1]))
-                            bots.bots[len(bots.bots) - 1].start()
-                            self.toMenu(aid)
-                    
-                    if aid in self.deleteUsers:
-                        if cmd == "отменить":
-                            self.send_msg_without_keyboard(aid, "Успешно, операция отменена")
-                            self.toMenu(aid)
-                            del self.deleteUsers[aid]
-                            continue
-                        else:
-                            if txt == self.deleteUsers[aid]:
-                                del DataBase[txt]
-                                with open(LoggedUsersPath, "w", encoding = "UTF-8") as f:
-                                    dump(DataBase, f)
-                                self.send_msg_without_keyboard(aid, "Успешно, сервер удалён")
-                                self.toMenu(aid)
-                                del self.deleteUsers[aid]
-                                continue
-                            else:
-                                self.send_msg_without_keyboard(aid, "Ошибка, название сервера не корректно")
-                                self.toMenu(aid)
-                                del self.deleteUsers[aid]
-                                continue
-
-                    
-                    if cmd in ["начать", "меню", "старт", "привет", "Start"]:
-                        self.toMenu(aid)
-                    elif cmd == "зарегистрировать сервер" and not self.checkOwner(aid):
-                        self.requestAuth[aid] = [1, "name", {
-                            "TOKEN": "",
-                            "OWNER": aid,
-                            "HOST": "ip",
-                            "ConsoleAllowDonate": "console",
-                            "authed": {},
-                            "RCON": {
-                                "PORT": -1,
-                                "PASSWORD": "rpass"
-                            },
-                            "MINECRAFT": {
-                                "PORT": -1
-                            },
-                            "FTP": {
-                                "USERNAME": "user",
-                                "PASSWORD": "fpass",
-                                "DataBaseFile": "dbf"
-                            }
-                        }]
-                        self.send_msg_with_keyboard(aid, "Успешно, запрос обрабатывается, введите Название сервера", keyboards["close"])
-                    elif cmd == "удалить сервер" and self.checkOwner(aid):
-                        nam = ""
-                        for f in DataBase:
-                            if DataBase[f]["OWNER"] == aid:
-                                nam = f
-                        self.deleteUsers[aid] = nam
-                        self.send_msg_with_keyboard(aid, "Успешно, введите название сервера для подтверждения операции (" + nam + ")", keyboards["close"])
-                    elif cmd == "управлять сервером" and self.checkOwner(aid):
-                        self.send_msg_without_keyboard(aid, "Извините, данная функция в разработке =(")
-                    self.vk.method("messages.markAsRead", {"peer_id": aid, "message_id": self.vk.method("messages.getHistory", {"user_id": aid, "count": 1})["items"][0]["id"]}) #Читаю сообщение
-
-    def send_msg_without_keyboard(self, peer, message): #Отправить сообщение без клавиатуры
-        self.vk.method("messages.send", {"peer_id": peer, "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
-
-    def send_msg_with_keyboard(self, peer, message, keyboardFilePath): #Отправить сообщение с клавиатурой
-        self.vk.method("messages.send", {"peer_id": peer, "message": message, "keyboard": open(keyboardFilePath, "r", encoding="UTF-8").read(), "random_id": randrange(0, 184467440737095516165, 1)})
-
-class MineBot(Thread):
-    def __init__(self, token, settings, name):
-        Thread.__init__(self)
-        self.Server = settings
-        self.name = name
-        self.authed = self.Server["authed"]
-        self.vk = vk_api.VkApi(token = token) #Сессия VK
-
-        self.authUsers = {} #Пользователи которые авториуются
-        self.enterUsers = {} #Пользователи которые вводят команду
-        self.changeUsers = {}
-
+def translate(cmd):
+    replacer = {
+            "q":"й", "w":"ц", "e":"у", "r":"к", "t":"е", "y":"н", "u":"г",
+            "i":"ш", "o":"щ", "p":"з", "[":"х", "]":"ъ", "a":"ф", "s":"ы",
+            "d":"в", "f":"а", "g":"п", "h":"р", "j":"о", "k":"л", "l":"д",
+            ";":"ж", "'":"э", "z":"я", "x":"ч", "c":"с", "v":"м", "b":"и",
+            "n":"т", "m":"ь", ",":"б", ".":"ю", "/":"."
+    }  
+    t = ""
+    for j in cmd:
         try:
-            self.vk.auth() #Авторизуюсь
-        except vk_api.AuthError: #Если ошибка авторизации
-            pass
+            t += replacer[j]
+        except KeyError:
+            t += j
+    return t
+
+def maybeInt(inr):
+    try:
+        int(inr)
+        return True
+    except TypeError:
+        return False
+def send_msgs(peers, message): #Отправить рассылку
+    if len(peers) > 100:
+        return
+    peers2 = []
+    for f in range(len(peers)):
+        peers2[f] = str(peers[f])
+    vk_session.method("messages.send", {"user_ids": ",".join(peers2), "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
     
-    def run(self):
-        print("Mine bot " + self.name + " is active")
-        longpoll = VkLongPoll(self.vk) #Сессия LongPoll
 
-        for event in longpoll.listen(): #Для каждого события
-            if event.type == VkEventType.MESSAGE_NEW: #Если событие - сообщение
-                if event.to_me: #Если сообщение мне
-                    aid = str(event.user_id)
-                    cmd = str(event.text).lower()
+for event in longpoll.listen(): #Для каждого события
+    if event.type == VkEventType.MESSAGE_NEW: #Если событие - сообщение
+        if event.to_me: #Если сообщение мне
+            if event.user_id in bl: #Если человек в BlackList
+                if not bl[event.user_id]: #Если ему ещё не присылали сообщение
+                    send_msg_without_keyboard(event.user_id, "Ошибка, вы находитесь в ЧС, если это ошибка - напишите администратору") #Пишу ему сообщение
+                    bl[event.user_id] = 1 #Теперь он уже видел сообщение
+                    with open(BlackListFile, "w", encoding = "UTF-8") as wf:
+                        dump(bl, wf)
+                continue #Если человек в ЧС пропускаю обработку команд
 
-                    if aid in self.authUsers:
-                        if cmd == "отменить":
-                            self.send_msg_with_keyboard(aid, "Для доступа к консоли введите логин и пароль", keyboards["Nauth"])
-                            del self.authUsers[aid]
-                        elif self.authUsers[aid][0] == 1:
-                            self.authUsers[aid] = [2, event.text]
-                            self.send_msg_without_keyboard(aid, "Успешно, введите пароль")
-                        elif self.authUsers[aid][0] == 2:
-                            if self.getDBFile(self.Server["HOST"], self.Server["FTP"]["USERNAME"], self.Server["FTP"]["PASSWORD"]) == -1:
-                                self.send_msg_with_keyboard(aid, "Ошибка, ошибка настроек сервера", keyboards["Nauth"])
-                                del self.authUsers[aid]
-                                continue
-                            conn = connect("DB" + self.name + ".db")
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT * FROM 'authme'")
-                            conn.commit()
-                            isHave = -1
-                            for u in cursor.fetchall():
-                                if u[1] == self.authUsers[aid][1]:
-                                    isHave = u[3]
-                            if isHave == -1:
-                                self.send_msg_with_keyboard(aid, "Ошибка, вас нету в базе данных AuthMe", keyboards["Nauth"])
-                                del self.authUsers[aid]
-                                continue
-                            valid = True
-                            free = False
-                            if not checkPassword(isHave, event.text):
-                                valid = False
-                            if valid: #Если логин и пароль верны
-                                for i in self.authed: #Если нету такого ника в базе
-                                    if self.authed[i][0] == self.authUsers[aid][1]:
-                                        self.send_msg_with_keyboard(aid, "Ошибка, к этому аккаунту уже привязан ВК профиль", keyboards["Nauth"])
-                                        del self.authUsers[aid]
-                                        free = True
-                                if free:
-                                    continue
-                                rs = post("https://ylousrp.ru/API/getPlayerDonate.php", data = {"ip": self.Server["HOST"], "port": self.Server["RCON"]["PORT"], "password": self.Server["RCON"]["PASSWORD"], "player": self.authUsers[aid][1]})
-                                if not rs.status_code == 200:
-                                    self.send_msg_with_keyboard(aid, "Ошибка, YCAPI не доступен", keyboards["Nauth"])
-                                    del self.authUsers[aid]
-                                    continue
-                                else:
-                                    if rs.text == "Connecting error":
-                                        self.send_msg_with_keyboard(aid, "Ошибка, сервер Minecraft отключен", keyboards["Nauth"])
-                                        del self.authUsers[aid]
-                                        continue
+            author = get_user(event.user_id)[0] #Получаю профиль автора
+            if allowTranslate: #Если включен переводчик
+                cmd = translate(str(event.text).lower()) #Получаю команду
+            else: #Если же нет
+                cmd = str(event.text).lower() #Получаю команду
+            aid = event.user_id #ID пользователя
+
+            if aid in addUsers: #Если автор предлагает вопрос
+                if cmd == "отменить": #Если человек нажал на кнопку ОТМЕНИТЬ
+                    if aid in adminID: #Если он админ
+                        send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
+                    else: #Для простых смертных
+                        send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
+                    del addUsers[aid] #Удаляю его из массива
+                else: #Если он не нажимал на ОТМЕНИТЬ
+                    if addUsers[aid][0] == 1: #Если он пока что ничего не ввёл
+                        addUsers[aid] = [2, cmd] #Переписываю данные массива
+                        send_msg_without_keyboard(aid, "Успешно, жду ответ...") #Отправляю сообщение
+                    elif addUsers[aid][0] == 2: #Если он уже ввёл вопрос
+                        send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ отправлен на модерирование") #Сообщаю заранее что всё прошло ОК
+
+                        TF.append([addUsers[aid][1], cmd, aid])
+                        with open(TempFile, "w", encoding = "UTF-8") as tf:
+                            dump(TF, tf)
+                        del addUsers[aid] #Удаляю из базы
+                        if aid in adminID: #Если человек админ
+                            send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
+                        else: #Если простой смертный
+                            send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
+
+            if aid in addAdmins: #Если админ добавляет вопрос
+                if addAdmins[aid][0] == 1: #Если он ничего пока что не ввёл
+                    addAdmins[aid] = [2, cmd] #Добавляю в массив
+                    send_msg_without_keyboard(aid, "Успешно, ожидаю ответ...") #Отправляю сообщение чтобы он отправил ответ
+                elif addAdmins[aid][0] == 2: #Если админ уже ввёл вопрос
+                    DB.append([addAdmins[aid][1], cmd])
+                    with open(DataBaseFile, "w", encoding = "UTF-8") as db:
+                        dump(DB, db)
+                    send_msg_without_keyboard(aid, "Успешно, ваш вопрос/ответ записан") #Сообщаю что всё ОК
+                    del addAdmins[aid]
+            
+            if aid in waitUsers: #Если человек хочет задать вопрос
+                if waitUsers[aid][0] == 2 and cmd == "это не ответ на мой вопрос": #Если он уже всё сделал но он написал что это не ответ на мой вопрос
+                    if aid in adminID:
+                        send_msg_with_keyboard(aid, "Ошибка, я не знаю ответ на ваш вопрос. Я уже написал администратору что надо добавить ваш вопрос в базу", keyboards["aMenu"])
+                    else:
+                        send_msg_with_keyboard(aid, "Ошибка, я не знаю ответ на ваш вопрос. Я уже написал администратору что надо добавить ваш вопрос в базу", keyboards["menu"]) #Отправляю его в меню
+                    send_msgs(adminID, "Человек (https://vk.com/id" + str(aid) + ") не нашёл ответ на свой вопрос: " + str(waitUsers[aid][1])) #Отправляю адмиНАМ что надо добавить вопрос в БД
+                    del waitUsers[aid] #Удаляю человека из массива
+                elif waitUsers[aid][0] == 2 and cmd == "спасибо": #Тоже самое как вверху только если он нажал на спасибо
+                    if aid in adminID: #Если он админ
+                        send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
+                    else:
+                        send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
+                elif waitUsers[aid][0] == 1: #Если он не ввёл вопрос
+                    if cmd == "отменить": #Если нажал на кнопку отменить
+                        del waitUsers[aid] #Удаляю из базы
+                        if aid in adminID: #Если он админ
+                            send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
+                        else:
+                            send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
+                    else: #Если он ввёл вопрос
+
+                        #Проверка на плохие слова
+                        if not aid in adminID: #Если человек админ - исключение
+                            jh = False #Пока что всё хорошо
+                            for k in cmd.split():
+                                if k in bad:
+                                    bl[aid] = 0
+                                    with open(BlackListFile, "w", encoding = "UTF-8") as blf:
+                                        dump(bl, blf)
+                                    if aid in adminID:
+                                        send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["aMenu"])
                                     else:
-                                         if not rs.text == self.Server["ConsoleAllowDonate"]:
-                                            self.send_msg_with_keyboard(aid, "Ошибка, пользователь с этим ником не имеет привелегии " + self.Server["ConsoleAllowDonate"], keyboards["Nauth"])
-                                            del self.authUsers[aid]
-                                            continue
-                                self.authed[aid] = [self.authUsers[aid][1], event.text]
-                                with open(LoggedUsersPath, "w") as wf:
-                                    dump(self.authed, wf)
-                                self.send_msg_with_keyboard(aid, "Успешно, вы авторизованы", keyboards["auth"])
-                                del self.authUsers[aid]
-                            else:
-                                self.send_msg_with_keyboard(aid, "Ошибка, логин или пароль некорректны", keyboards["Nauth"])
-                                del self.authUsers[aid]
+                                        send_msg_with_keyboard(aid, "Ты назвал нецензурный вопрос, ты добавлен в ЧС бота", keyboards["menu"])
+                                    jh = True
+                            if jh:
                                 continue
+                        #/////////////////////////
 
-                    if aid in self.enterUsers:
-                        if cmd == "отменить":
-                            self.send_msg_with_keyboard(aid, "Главное меню", keyboards["auth"])
-                            del self.enterUsers[aid]
-                        elif self.enterUsers[aid][0] == 1:
-                            rs = post("https://ylousrp.ru/API/rcon.php", data = {"ip": self.Server["HOST"], "port": self.Server["RCON"]["PORT"], "password": self.Server["RCON"]["PASSWORD"], "cmd": event.text})
-                            if not rs.status_code == 200:
-                                print(rs.status_code)
-                                self.send_msg_with_keyboard(aid, "Ошибка, YCAPI не доступен", keyboards["auth"])
-                                del self.enterUsers[aid]
-                            else:
-                                if rs.text == "Connecting error":
-                                    self.send_msg_with_keyboard(aid, "Ошибка, сервер Minecraft отключен", keyboards["auth"])
-                                    del self.enterUsers[aid]
-                                elif rs.text == "REQUEST INVALID":
-                                    print("ERROR:", rs.text)
-                                    self.send_msg_with_keyboard(aid, "Ошибка, внутриняя ошибка скрипта бота", keyboards["auth"])
-                                    del self.enterUsers[aid]
-                                else: 
-                                    try:
-                                        self.send_msg_with_keyboard(aid, rs.text, keyboards["auth"])
-                                    except:
-                                        pass
-                                    del self.enterUsers[aid]
+                        r = {"index": 0, "percent": 0} #Как у кеши
+                        for l in range(len(DB)): #Для каждой строки в базе
+                            h = ratio(cmd, DB[l][0]) #Считаю схожесть строк
+                            if h > r["percent"]: #Ищу самый подходящий вопрос
+                                r["index"] = l
+                        waitUsers[aid][1] = cmd 
+                        send_msg_with_keyboard(aid, "Успешно, я выбрал самый похожий вопрос (" + str(DB[r["index"]][0]) + ") и вот на него ответ: " + str(DB[r["index"]][1]), keyboards["badFAQ"])
+                        waitUsers[aid][0] = 2 #Ожидаю отзыв
+            
+            if cmd == "старт" or cmd == "меню" or cmd == "начать": #Основные команды
+                if aid in adminID: #Если человек админ
+                    send_msg_with_keyboard(aid, "Главное меню (Админ)", keyboards["aMenu"])
+                else:
+                    send_msg_with_keyboard(aid, "Главное меню", keyboards["menu"])
+            elif cmd == "задать вопрос" and not aid in addUsers: #Задать вопрос (Не админ)
+                send_msg_with_keyboard(aid, "Ожидаю вопрос...", keyboards["close"])
+                waitUsers[aid] = [1, ""]
+            elif cmd == "предложить вопрос" and not aid in waitUsers: #Предложить вопрос (Не админ)
+                send_msg_with_keyboard(aid, "Ожидаю вопрос...", keyboards["close"])
+                addUsers[aid] = [1, "Q"]
+            elif cmd == "добавить": #Добавить вопрос/ответ (Админ)
+                if not aid in adminID:
+                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор") #Ошибка прав
+                    continue
+                send_msg_without_keyboard(aid, "Ожидаю вопрос...")
+                addAdmins[aid] = [1, "Q"]
+            elif cmd == "просмотреть предложения": #Модерировать предложения  (Админ)
+                if not aid in adminID:
+                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
+                    continue
+                if len(TF) >= 1: #Если предложения есть
+                    string = ""
+                    for y in range(len(TF)):
+                        string += str(y + 1) + ". " + str(TF[y][0]) + "  Ответ: " + str(TF[y][1]) + "  От: https://vk.com/id" + str(TF[y][2]) + " ;\n"
+                    send_msg_without_keyboard(aid, "Вопросы на модерацию:\n" + string)
+                    send_msg_without_keyboard(aid, "Подсказка: введите удалить {Index} что бы отклонить предложение\nВведите проверка {Index} что бы добавить предложение в основную БД")
+                else:
+                    send_msg_without_keyboard(aid, "Ошибка, нет предложений на модерацию")
+            elif cmd.split()[0] == "удалить":
+                if not aid in adminID:
+                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
+                    continue
+                if not have(cmd.split(), 1):
+                    send_msg_without_keyboard(aid, "Ошибка, вы не ввели index")
+                    continue
+                if not maybeInt(cmd.split()[1]):
+                    send_msg_without_keyboard(aid, "Ошибка, Index не int")
+                    continue
+                if have(TF, int(cmd.split()[1]) - 1):
+                    del TF[int(cmd.split()[1]) - 1]
+                    with open(TempFile, "w", encoding = "UTF-8") as tf:
+                        dump(TF, tf)
+                    send_msg_without_keyboard(aid, "Успешно, предложение отклонено")
+                else:
+                    send_msg_without_keyboard(aid, "Ошибка, в базе данных нету строки с индексом " + str(cmd.split()[1]))
+                    continue
+            elif cmd.split()[0] == "проверка":
+                if not aid in adminID:
+                    send_msg_without_keyboard(aid, "Ошибка, вы не Администратор")
+                    continue
+                if not have(cmd.split(), 1):
+                    send_msg_without_keyboard(aid, "Ошибка, вы не ввели index")
+                    continue
+                if not maybeInt(cmd.split()[1]):
+                    send_msg_without_keyboard(aid, "Ошибка, Index не int")
+                    continue
+                if not have(TF, int(cmd.split()[1]) - 1):
+                    send_msg_without_keyboard(aid, "Ошибка, в базе данных нету строки с индексом " + str(cmd.split()[1]))
+                    continue
+                else:
+                    h = int(cmd.split()[1]) - 1
+                DB.append([TF[h][0], TF[h][1]])
+                with open(DataBaseFile, "w", encoding = "UTF-8") as db:
+                    dump(DB, db)
+                del TF[int(cmd.split()[1]) - 1]
+                with open(TempFile, "w", encoding = "UTF-8") as tf:
+                    dump(TF, tf)
+                send_msg_without_keyboard(aid, "Успешно, предложение принято")
+            elif cmd == "мы":
+                send_msg_without_keyboard(aid, """
+Создатель: Даниил Тенишев
+Версия: 1.3
+Библиотеки: vk_api, requests, fuzzywuzzy
+                """)
 
-                    if aid in self.changeUsers:
-                        if cmd == "отменить":
-                            self.send_msg_with_keyboard(aid, "Главное меню", keyboards["auth"])
-                            del self.changeUsers[aid]
-                        elif self.changeUsers[aid][0] == 1:
-                            self.changeUsers[aid] = [2, event.text]
-                            self.send_msg_without_keyboard(aid, "Успешно, введите новый пароль")
-                        elif self.changeUsers[aid][0] == 2:
-                            if self.authed[aid][1] == self.changeUsers[aid][1]:
-                                rs = post("https://ylousrp.ru/API/rcon.php", data = {"ip": self.Server["HOST"], "port": self.Server["RCON"]["PORT"], "password": self.Server["RCON"]["PASSWORD"], "cmd": "authme password " + self.authed[aid][0] + " " + event.text})
-                                if not rs.status_code == 200:
-                                    print(rs.status_code)
-                                    self.send_msg_with_keyboard(aid, "Ошибка, YCAPI не доступен", keyboards["auth"])
-                                    del self.changeUsers[aid]
-                                else:
-                                    if rs.text == "Connecting error":
-                                        self.send_msg_with_keyboard(aid, "Ошибка, сервер Minecraft отключен", keyboards["auth"])
-                                        del self.changeUsers[aid]
-                                    elif rs.text == "REQUEST INVALID":
-                                        print("ERROR:", rs.text)
-                                        self.send_msg_with_keyboard(aid, "Ошибка, внутриняя ошибка скрипта бота", keyboards["auth"])
-                                        del self.changeUsers[aid]
-                                    else: 
-                                        self.send_msg_with_keyboard(aid, "Успешно, пароль изменён", keyboards["auth"])
-                                        del self.changeUsers[aid]
-                            else:
-                                self.send_msg_with_keyboard(aid, "Ошибка, ваш старый пароль некорректен", keyboards["auth"])
-                                del self.changeUsers[aid]
-
-                    if cmd in ["начать", "меню", "старт", "привет", "Start"]:
-                        if aid in self.authed:
-                            self.send_msg_with_keyboard(aid, "Главное меню", keyboards["auth"])
-                        else:
-                            self.send_msg_with_keyboard(aid, "Для доступа к консоли введите логин и пароль", keyboards["Nauth"])
-                    elif cmd == "зарегистрироваться" and not aid in self.authed:
-                        self.authUsers[aid] = [1, "login"]
-                        self.send_msg_with_keyboard(aid, "Введите свой никнейм", keyboards["close"])
-                    elif cmd == "ввести команду" and aid in self.authed and not aid in self.changeUsers:
-                        self.enterUsers[aid] = [1, "cmd"]
-                        self.send_msg_with_keyboard(aid, "Успешно, введите команду", keyboards["close"])
-                    elif cmd == "сменить пароль" and aid in self.authed and not aid in self.enterUsers:
-                        self.changeUsers[aid] = [1, "oldPass"]
-                        self.send_msg_with_keyboard(aid, "Успешно, введите старый пароль", keyboards["close"])
-                    self.vk.method("messages.markAsRead", {"peer_id": aid, "message_id": self.vk.method("messages.getHistory", {"user_id": aid, "count": 1})["items"][0]["id"]}) #Читаю сообщение
-
-    def getDBFile(self, host, user, password): #Получаю по FTP БД AuthMe
-        try:
-            ftp = FTP(host, user, password)
-        except:
-            return -1
-        ftp.login(user, password)
-        ftp.cwd("plugins")
-        ftp.cwd("AuthMe")
-        if post("https://ylousrp.ru/API/monitoring.php", {"ip": self.Server["MINECRAFT"]["HOST"], "port": self.Server["MINECRAFT"]["PORT"]}).json()["online"]:
-            post("https://ylousrp.ru/API/rcon.php", data = {"ip": self.Server["HOST"], "port": self.Server["RCON"]["PORT"], "password": self.Server["RCON"]["PASSWORD"], "cmd": "plugman disable AuthMe"})
-        with open("DB" + self.name + ".db", "wb") as f:
-            ftp.retrbinary("RETR " + self.Server["FTP"]["DataBaseFile"], f.write)
-        ftp.quit()
-        if post("https://ylousrp.ru/API/monitoring.php", {"ip": self.Server["MINECRAFT"]["HOST"], "port": self.Server["MINECRAFT"]["PORT"]}).json()["online"]:
-            post("https://ylousrp.ru/API/rcon.php", data = {"ip": self.Server["HOST"], "port": self.Server["RCON"]["PORT"], "password": self.Server["RCON"]["PASSWORD"], "cmd": "plugman enable AuthMe"})
-
-    def send_msg_without_keyboard(self, peer, message): #Отправить сообщение без клавиатуры
-        self.vk.method("messages.send", {"peer_id": peer, "message": message, "random_id": randrange(0, 184467440737095516165, 1)})
-
-    def send_msg_with_keyboard(self, peer, message, keyboardFilePath): #Отправить сообщение с клавиатурой
-        self.vk.method("messages.send", {"peer_id": peer, "message": message, "keyboard": open(keyboardFilePath, "r", encoding="UTF-8").read(), "random_id": randrange(0, 184467440737095516165, 1)})
-
-
-
-class Bots:
-    def __init__(self, mainToken):
-        self.bots = []
-        self.mainBot = Main(mainToken)
-        for b in DataBase:
-            self.bots.append(MineBot(DataBase[b]["TOKEN"], DataBase[b], b))
-            self.bots[len(self.bots) - 1].start()
-        self.mainBot.start()
-bots = Bots(token)
+            vk_session.method("messages.markAsRead", {"peer_id": aid, "message_id": vk_session.method("messages.getHistory", {"user_id": aid, "count": 1})["items"][0]["id"]}) #Читаю сообщение
+    else:
+        if eventsDebug: #Если отладка
+            print(event.type, event.raw[1:]) #Пишу событие
